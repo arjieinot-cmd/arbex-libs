@@ -35,7 +35,8 @@ jobs:
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF \
             -DGGML_BACKEND_DL=OFF \
-            -DBUILD_SHARED_LIBS=ON
+            -DBUILD_SHARED_LIBS=ON \
+            -DGGML_OPENMP=OFF
           make -j4 llama ggml
 
       - name: Collect libraries
