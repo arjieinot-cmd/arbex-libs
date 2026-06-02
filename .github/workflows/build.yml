@@ -44,6 +44,92 @@ jobs:
           mkdir -p output
           find llama.cpp/build-android -name "*.so" -exec cp {} output/ \;
 
+      - name: Build JNI library
+        run: |
+          cat > arbex_jni.cpp << 'JNIEOF'
+          #include <jni.h>
+          #include <string>
+          #include <vector>
+          #include <android/log.h>
+          #include "llama.h"
+          #include "ggml-backend.h"
+          #define TAG "ArbexJNI"
+          static llama_model* model = nullptr;
+          static llama_context* ctx = nullptr;
+          extern "C" {
+          JNIEXPORT jstring JNICALL
+          Java_com_arbex_agent_ArbexBrain_initModelStr(JNIEnv* env, jobject thiz, jstring modelPath, jstring libDir) {
+              const char* path = env->GetStringUTFChars(modelPath, nullptr);
+              const char* libs = env->GetStringUTFChars(libDir, nullptr);
+              ggml_backend_load_all_from_path(libs);
+              llama_backend_init();
+              llama_model_params mparams = llama_model_default_params();
+              mparams.n_gpu_layers = 0;
+              model = llama_model_load_from_file(path, mparams);
+              env->ReleaseStringUTFChars(modelPath, path);
+              env->ReleaseStringUTFChars(libDir, libs);
+              if (!model) return env->NewStringUTF("model load failed");
+              llama_context_params cparams = llama_context_default_params();
+              cparams.n_ctx = 512;
+              cparams.n_threads = 2;
+              ctx = llama_init_from_model(model, cparams);
+              if (!ctx) return env->NewStringUTF("context failed");
+              return env->NewStringUTF("OK");
+          }
+          JNIEXPORT jstring JNICALL
+          Java_com_arbex_agent_ArbexBrain_askNative(JNIEnv* env, jobject, jstring jprompt) {
+              if (!ctx || !model) return env->NewStringUTF("Brain not ready.");
+              const char* prompt = env->GetStringUTFChars(jprompt, nullptr);
+              std::string p(prompt);
+              env->ReleaseStringUTFChars(jprompt, prompt);
+              const llama_vocab* vocab = llama_model_get_vocab(model);
+              std::vector<llama_token> tokens(512);
+              int n = llama_tokenize(vocab, p.c_str(), p.size(), tokens.data(), tokens.size(), true, false);
+              if (n < 0) return env->NewStringUTF("Tokenize failed.");
+              tokens.resize(n);
+              llama_memory_clear(llama_get_memory(ctx), false);
+              llama_batch batch = llama_batch_get_one(tokens.data(), n);
+              if (llama_decode(ctx, batch) != 0) return env->NewStringUTF("Decode failed.");
+              std::string response;
+              llama_token eos = llama_vocab_eos(vocab);
+              llama_sampler* sampler = llama_sampler_chain_init(llama_sampler_chain_default_params());
+              llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
+              llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+              for (int i = 0; i < 150; i++) {
+                  llama_token token = llama_sampler_sample(sampler, ctx, -1);
+                  if (token == eos) break;
+                  char buf[256];
+                  int len = llama_token_to_piece(vocab, token, buf, sizeof(buf), 0, false);
+                  if (len > 0) {
+                      std::string piece(buf, len);
+                      response.append(piece);
+                      if (response.find("\nUser") != std::string::npos) {
+                          response = response.substr(0, response.find("\nUser"));
+                          break;
+                      }
+                  }
+                  llama_batch next = llama_batch_get_one(&token, 1);
+                  llama_decode(ctx, next);
+              }
+              llama_sampler_free(sampler);
+              return env->NewStringUTF(response.c_str());
+          }
+          JNIEXPORT void JNICALL
+          Java_com_arbex_agent_ArbexBrain_freeModel(JNIEnv*, jobject) {
+              if (ctx) { llama_free(ctx); ctx = nullptr; }
+              if (model) { llama_model_free(model); model = nullptr; }
+              llama_backend_free();
+          }
+          }
+          JNIEOF
+          $NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++ \
+            -shared -fPIC \
+            -o output/libarbex_jni.so \
+            arbex_jni.cpp \
+            -I llama.cpp/include \
+            -L output \
+            -lllama -lggml -landroid -llog
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
