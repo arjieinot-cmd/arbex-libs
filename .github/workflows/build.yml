@@ -127,6 +127,7 @@ jobs:
             -o output/libarbex_jni.so \
             arbex_jni.cpp \
             -I llama.cpp/include \
+            -I llama.cpp/ggml/include \
             -L output \
             -lllama -lggml -landroid -llog
 
